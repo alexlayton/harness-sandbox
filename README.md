@@ -42,6 +42,7 @@ harness-sandbox                      # Harness, with this directory at /workspac
 harness-sandbox -- --version         # arguments after -- go to harness
 harness-sandbox -m 4g -c 4           # more memory / CPUs
 harness-sandbox --github             # allow GitHub access (see below)
+harness-sandbox --rex                # let rex in the sandbox drive the host's Rex server
 harness-sandbox shell                # bash instead of harness
 harness-sandbox shell -- -c 'ls /workspace'
 harness-sandbox --dry-run            # print the container command and exit
@@ -63,6 +64,7 @@ harness-sandbox --dry-run            # print the container command and exit
 | `-e, --env KEY[=VAL]` | Pass an environment variable (`KEY` alone forwards the host value) |
 | `-v, --volume SPEC` | Extra mount, `host:container[:ro]` |
 | `-g, --github` | GitHub access (see below) |
+| `--rex` | Connect `rex` in the sandbox to the host's Rex server (see below) |
 | `--image IMAGE` | Use a different image |
 | `--dry-run` | Print the command instead of running it |
 
@@ -108,6 +110,19 @@ HTTPS so SSH keys aren't needed.
 
 Without `--github` the container has no GitHub credentials. Commits still work
 because your git identity is mounted.
+
+### Rex access
+
+`--rex` lets a `rex` CLI inside the sandbox (add it with a per-project image) control
+the [Rex](https://www.superlogical.com/rex) server on your Mac. It mounts the server's Unix
+socket (`~/Library/Application Support/rex/server.sock`, or `$HARNESS_SANDBOX_REX_SOCKET`)
+at `/run/rex.sock` and sets `REX_SERVER=unix:///run/rex.sock`. The socket file itself must
+be mounted; mounting its directory doesn't work. If `REX_SESSION`, `REX_WINDOW`,
+`REX_BLOCK` or `REX_CLIENT` are set on the host (as in a Rex terminal), they are passed
+through too.
+
+> The Rex server sees the sandbox as you, a local client with full access: it can open
+> sessions and run commands on the Mac.
 
 ### Per-project images
 

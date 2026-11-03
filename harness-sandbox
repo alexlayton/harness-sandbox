@@ -24,6 +24,8 @@ Options:
   -v, --volume SPEC   extra mount host:container[:ro]
   -g, --github        give the sandbox GitHub access (gh + git over https) using
                       $HARNESS_SANDBOX_GH_TOKEN or else `gh auth token`
+      --rex           connect rex in the sandbox to the host's Rex server (mounts
+                      \$HARNESS_SANDBOX_REX_SOCKET, default the Rex app's socket)
       --image IMAGE   use this image instead of the base/project image
       --dry-run       print the command and exit
 
@@ -49,7 +51,7 @@ case "${1:-}" in
   -h|--help|help) usage; exit 0 ;;
 esac
 
-dir="$PWD"; image=""; dry=0; github=0; args=(); harness_args=()
+dir="$PWD"; image=""; dry=0; github=0; rex=0; args=(); harness_args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -d|--dir) dir="$2"; shift 2 ;;
@@ -59,6 +61,7 @@ while [ $# -gt 0 ]; do
     -v|--volume) args+=(-v "$2"); shift 2 ;;
     --image) image="$2"; shift 2 ;;
     -g|--github) github=1; shift ;;
+    --rex) rex=1; shift ;;
     --dry-run) dry=1; shift ;;
     --) shift; harness_args=("$@"); break ;;
     *) die "unknown option: $1 (use -- to pass args to harness)" ;;
@@ -118,6 +121,20 @@ if [ "$github" = 1 ]; then
     -e GIT_CONFIG_VALUE_1=git@github.com:
     -e GIT_CONFIG_KEY_2=url.https://github.com/.insteadOf
     -e GIT_CONFIG_VALUE_2=ssh://git@github.com/)
+fi
+
+# Rex: mount the host server's Unix socket file itself (not its directory) and point rex at
+# it. The server sees a local client, so it admits you exactly as it does on the host.
+if [ "$rex" = 1 ]; then
+  rex_sock="${HARNESS_SANDBOX_REX_SOCKET:-$HOME/Library/Application Support/rex/server.sock}"
+  [ -S "$rex_sock" ] || die "--rex: no Rex server socket at $rex_sock (is Rex running?)"
+  mounts+=(-v "$rex_sock:/run/rex.sock")
+  args+=(-e REX_SERVER=unix:///run/rex.sock)
+  # Forward the host's Rex context (set when run from inside a Rex terminal) so the
+  # sandbox's rex commands target the same session/block.
+  for v in REX_SESSION REX_WINDOW REX_BLOCK REX_CLIENT; do
+    [ -n "${!v:-}" ] && args+=(-e "$v=${!v}")
+  done
 fi
 
 tty=(); [ -t 0 ] && [ -t 1 ] && tty=(-it)
