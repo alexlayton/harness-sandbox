@@ -1,0 +1,89 @@
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - Dockerfile
+      - .github/workflows/image.yml
+  pull_request:
+    paths:
+      - Dockerfile
+  schedule:
+    # Daily: pick up new Harness releases. Mondays also rebuild unconditionally
+    # to pick up Debian security updates.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    # Apple's `container` runs arm64 Linux VMs, so publish linux/arm64 only,
+    # built natively (no QEMU).
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Latest Harness release (public repo), e.g. v0.10.0 -> 0.10.0.
+      - id: harness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view -R alexlayton/harness --json tagName -q .tagName)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # Scheduled runs only rebuild when there is a new Harness release, or on
+      # Mondays (base image refresh). Every other trigger always builds.
+      - id: plan
+        env:
+          IMAGE_TAG: ${{ env.IMAGE }}:harness-${{ steps.harness.outputs.version }}
+        run: |
+          build=true
+          if [ "${{ github.event_name }}" = schedule ] && [ "$(date -u +%u)" != 1 ] \
+             && docker buildx imagetools inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+            build=false
+            echo "$IMAGE_TAG already published; skipping"
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+      - id: meta
+        if: steps.plan.outputs.build == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          labels: |
+            io.github.alexlayton.harness-version=${{ steps.harness.outputs.version }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=harness-${{ steps.harness.outputs.version }},enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - uses: docker/build-push-action@v6
+        if: steps.plan.outputs.build == 'true'
+        with:
+          context: .
+          platforms: linux/arm64
+          build-args: HARNESS_VERSION=${{ steps.harness.outputs.tag }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

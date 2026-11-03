@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# harness-sandbox: run Harness in an Apple container with the current dir mounted.
+set -euo pipefail
+
+SELF_DIR="$(cd -P "$(dirname "$(readlink "${BASH_SOURCE[0]}" || echo "${BASH_SOURCE[0]}")")" && pwd)"
+BASE_IMAGE="${HARNESS_SANDBOX_IMAGE:-ghcr.io/alexlayton/harness-sandbox:latest}"
+SANDBOX_CONFIG="${HARNESS_SANDBOX_CONFIG:-$HOME/.config/harness-sandbox/config.toml}"
+HOST_CONFIG="${HARNESS_CONFIG_DIR:-$HOME/.config/harness}"
+
+usage() {
+  cat <<USAGE
+Usage: harness-sandbox [options] [-- harness args...]
+       harness-sandbox shell [options] [-- cmd]   bash (or cmd) instead of harness
+       harness-sandbox update              pull the latest base image
+       harness-sandbox build               build the base image locally (from a git checkout)
+       harness-sandbox ls                  list sandbox containers
+       harness-sandbox clean               remove stopped sandbox containers
+
+Options:
+  -d, --dir DIR       project dir to mount at /workspace (default: \$PWD)
+  -m, --memory SIZE   e.g. 4g (default: container default)
+  -c, --cpus N
+  -e, --env KEY[=VAL] pass env var (KEY alone forwards the host value)
+  -v, --volume SPEC   extra mount host:container[:ro]
+  -g, --github        give the sandbox GitHub access (gh + git over https) using
+                      $HARNESS_SANDBOX_GH_TOKEN or else `gh auth token`
+      --image IMAGE   use this image instead of the base/project image
+      --dry-run       print the command and exit
+
+A project can add .harness-sandbox/Dockerfile (FROM ghcr.io/alexlayton/harness-sandbox ...)
+to extend the base image. config.toml precedence: .harness-sandbox/config.toml, then $SANDBOX_CONFIG
+USAGE
+}
+
+die() { echo "harness-sandbox: $*" >&2; exit 1; }
+command -v container >/dev/null || die "'container' not found"
+
+cmd=run
+case "${1:-}" in
+  shell) cmd=shell; shift ;;
+  update) exec container image pull "$BASE_IMAGE" ;;
+  build)
+    [ -f "$SELF_DIR/Dockerfile" ] || die "no Dockerfile next to this script; 'build' only works from a git checkout (use 'update' to pull the published image)"
+    exec container build -t "${HARNESS_SANDBOX_IMAGE:-harness-sandbox:local}" "$SELF_DIR" ;;
+  ls)    exec container ls -a ;;
+  clean)
+    container ls -a --quiet | grep '^hs-' | while read -r n; do container rm "$n" || true; done
+    exit 0 ;;
+  -h|--help|help) usage; exit 0 ;;
+esac
+
+dir="$PWD"; image=""; dry=0; github=0; args=(); harness_args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d|--dir) dir="$2"; shift 2 ;;
+    -m|--memory) args+=(--memory "$2"); shift 2 ;;
+    -c|--cpus) args+=(--cpus "$2"); shift 2 ;;
+    -e|--env) args+=(-e "$2"); shift 2 ;;
+    -v|--volume) args+=(-v "$2"); shift 2 ;;
+    --image) image="$2"; shift 2 ;;
+    -g|--github) github=1; shift ;;
+    --dry-run) dry=1; shift ;;
+    --) shift; harness_args=("$@"); break ;;
+    *) die "unknown option: $1 (use -- to pass args to harness)" ;;
+  esac
+done
+
+dir="$(cd -P "$dir" && pwd)"
+config="$(cd -P "$HOST_CONFIG" && pwd)" || die "no harness config at $HOST_CONFIG"
+[ -f "$config/auth.json" ] || die "no auth.json in $config - sign in with harness on the host first"
+name="$(basename "$dir" | tr -c 'A-Za-z0-9\n_.-' '-')"
+
+# Project-specific image layered on the base image.
+if [ -z "$image" ]; then
+  image="$BASE_IMAGE"
+  pf="$dir/.harness-sandbox/Dockerfile"
+  [ -f "$pf" ] || pf="$dir/.harness-sandbox/Containerfile"
+  if [ -f "$pf" ]; then
+    image="hs-img-$name"
+    if [ "$dry" = 0 ]; then container build -t "$image" -f "$pf" "$dir/.harness-sandbox" >&2; fi
+  fi
+fi
+
+mounts=(-v "$dir:/workspace" -v "$config:/harness-config")
+
+# config.toml overlay (read-only), first match wins:
+#   <project>/.harness-sandbox/config.toml > ~/.config/harness-sandbox/config.toml > host config
+for c in "$dir/.harness-sandbox/config.toml" "$SANDBOX_CONFIG"; do
+  if [ -f "$c" ]; then mounts+=(-v "$(realpath "$c"):/harness-config/config.toml:ro"); break; fi
+done
+
+# Global skills (read-only). Container home is /root.
+skills_dirs=("$HOME/.agents/skills:/root/.agents/skills" "$HOME/.harness/skills:/root/.harness/skills")
+for pair in "${skills_dirs[@]}"; do
+  src="${pair%%:*}"
+  [ -d "$src" ] && mounts+=(-v "$(cd -P "$src" && pwd):${pair#*:}:ro")
+done
+if [ -n "${HARNESS_SKILLS_DIR:-}" ] && [ -d "$HARNESS_SKILLS_DIR" ]; then
+  mounts+=(-v "$(cd -P "$HARNESS_SKILLS_DIR" && pwd):/harness-skills:ro" -e HARNESS_SKILLS_DIR=/harness-skills)
+fi
+
+# Git identity: mount the host gitconfig (symlink resolved) read-only.
+[ -f "$HOME/.gitconfig" ] && mounts+=(-v "$(realpath "$HOME/.gitconfig"):/root/.gitconfig:ro")
+
+# GitHub access: token goes in via env only (never on the command line).
+if [ "$github" = 1 ]; then
+  token="${HARNESS_SANDBOX_GH_TOKEN:-}"
+  if [ -z "$token" ]; then
+    command -v gh >/dev/null || die "--github needs gh on the host (or set HARNESS_SANDBOX_GH_TOKEN)"
+    if [ "$dry" = 1 ]; then token=dry-run; else token="$(gh auth token)" || die "gh is not logged in (gh auth login)"; fi
+  fi
+  export GH_TOKEN="$token"
+  args+=(-e GH_TOKEN
+    -e GIT_CONFIG_COUNT=3
+    -e GIT_CONFIG_KEY_0=credential.https://github.com.helper
+    -e "GIT_CONFIG_VALUE_0=!gh auth git-credential"
+    -e GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf
+    -e GIT_CONFIG_VALUE_1=git@github.com:
+    -e GIT_CONFIG_KEY_2=url.https://github.com/.insteadOf
+    -e GIT_CONFIG_VALUE_2=ssh://git@github.com/)
+fi
+
+tty=(); [ -t 0 ] && [ -t 1 ] && tty=(-it)
+if [ "$cmd" = shell ]; then entry=(bash ${harness_args[@]+"${harness_args[@]}"}); else entry=(harness ${harness_args[@]+"${harness_args[@]}"}); fi
+
+full=(container run --rm ${tty[@]+"${tty[@]}"} --name "hs-$name-$$" "${mounts[@]}" -w /workspace ${args[@]+"${args[@]}"} "$image" "${entry[@]}")
+if [ "$dry" = 1 ]; then printf '%q ' "${full[@]}"; echo; exit 0; fi
+exec "${full[@]}"
