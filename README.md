@@ -1,3 +1,5 @@
+![harness-sandbox](assets/header.png)
+
 # harness-sandbox
 
 Run [Harness](https://github.com/alexlayton/harness) inside an
