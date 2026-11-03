@@ -120,8 +120,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
 
 ## The base image
 
-`ghcr.io/alexlayton/harness-sandbox` is Debian (bookworm-slim) with `git`,
-`git-lfs`, `gh`, `ripgrep`, `curl`, `ssh` and the Harness release binary,
+`ghcr.io/alexlayton/harness-sandbox` is Debian (trixie-slim) with `git`,
+`git-lfs`, `gh`, `ripgrep`, `curl`, `ssh`, `rtk` (the Apache-2.0 `rtk-oss` edition) and the Harness release binary,
 checksum verified. It is built for `linux/arm64`. Tags: `latest`,
 `harness-X.Y.Z` (pin to a Harness version), plus a version tag for each release
 of this repo.
