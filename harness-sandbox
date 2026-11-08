@@ -26,6 +26,8 @@ Options:
                       $HARNESS_SANDBOX_GH_TOKEN or else `gh auth token`
       --rex           connect rex in the sandbox to the host's Rex server (mounts
                       \$HARNESS_SANDBOX_REX_SOCKET, default the Rex app's socket)
+      --host-script   run <project>/.harness-sandbox/host-start on the Mac for the duration
+                      of the session (e.g. to start an MCP bridge). Runs unsandboxed.
       --image IMAGE   use this image instead of the base/project image
       --dry-run       print the command and exit
 
@@ -51,7 +53,7 @@ case "${1:-}" in
   -h|--help|help) usage; exit 0 ;;
 esac
 
-dir="$PWD"; image=""; dry=0; github=0; rex=0; args=(); harness_args=()
+dir="$PWD"; image=""; dry=0; github=0; rex=0; hostscript=0; args=(); harness_args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -d|--dir) dir="$2"; shift 2 ;;
@@ -62,6 +64,7 @@ while [ $# -gt 0 ]; do
     --image) image="$2"; shift 2 ;;
     -g|--github) github=1; shift ;;
     --rex) rex=1; shift ;;
+    --host-script) hostscript=1; shift ;;
     --dry-run) dry=1; shift ;;
     --) shift; harness_args=("$@"); break ;;
     *) die "unknown option: $1 (use -- to pass args to harness)" ;;
@@ -137,9 +140,39 @@ if [ "$rex" = 1 ]; then
   done
 fi
 
+# Host script: <project>/.harness-sandbox/host-start runs on the Mac, in the background, for
+# as long as the sandbox does. It is given HS_GATEWAY (the address containers reach the Mac
+# at) and must create the file named by HS_READY once it is serving. Opt-in because it runs
+# outside the sandbox, and the agent can edit it.
+hook_pid=""
+if [ "$hostscript" = 1 ]; then
+  hook="$dir/.harness-sandbox/host-start"
+  [ -x "$hook" ] || die "--host-script: $hook is missing or not executable"
+  if [ "$dry" = 1 ]; then
+    echo "would run $hook" >&2
+  else
+    gw="$(container network inspect default 2>/dev/null | sed -n 's/.*"ipv4Gateway" *: *"\([0-9.]*\)".*/\1/p' | head -1)"
+    ready="$(mktemp -u -t hs-ready)"
+    hooklog="$(mktemp -t hs-host-start)"
+    set -m   # own process group, so the whole tree can be stopped
+    HS_GATEWAY="${gw:-192.168.64.1}" HS_READY="$ready" "$hook" >"$hooklog" 2>&1 </dev/null &
+    hook_pid=$!
+    set +m
+    trap 'kill -- -"$hook_pid" 2>/dev/null; rm -f "$ready" "$hooklog"' EXIT
+    for _ in $(seq 300); do
+      [ -e "$ready" ] && break
+      kill -0 "$hook_pid" 2>/dev/null || { cat "$hooklog" >&2; die "--host-script: $hook exited before it was ready"; }
+      sleep 0.1
+    done
+    [ -e "$ready" ] || { cat "$hooklog" >&2; die "--host-script: $hook was not ready after 30s"; }
+  fi
+fi
+
 tty=(); [ -t 0 ] && [ -t 1 ] && tty=(-it)
 if [ "$cmd" = shell ]; then entry=(bash ${harness_args[@]+"${harness_args[@]}"}); else entry=(harness ${harness_args[@]+"${harness_args[@]}"}); fi
 
 full=(container run --rm ${tty[@]+"${tty[@]}"} --name "hs-$name-$$" "${mounts[@]}" -w /workspace ${args[@]+"${args[@]}"} "$image" "${entry[@]}")
 if [ "$dry" = 1 ]; then printf '%q ' "${full[@]}"; echo; exit 0; fi
+# With a host script running, stay around to stop it when the container exits.
+if [ -n "$hook_pid" ]; then "${full[@]}"; exit $?; fi
 exec "${full[@]}"
