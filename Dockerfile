@@ -20,7 +20,7 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 RUN git config --system --add safe.directory '*'
 
 # Pin the Harness release; override with --build-arg HARNESS_VERSION=vX.Y.Z
-ARG HARNESS_VERSION=v0.10.0
+ARG HARNESS_VERSION=v0.10.2
 ARG TARGETARCH
 
 # Download, verify the SHA-256 checksum, and install to /usr/local/bin.
