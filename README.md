@@ -131,8 +131,8 @@ through too.
 background, while the sandbox runs, and stops it afterwards. It gets `HS_GATEWAY` (the
 address containers reach the Mac at, normally `192.168.64.1`) and must create the file
 named by `HS_READY` once it is serving. Use it to start things the sandbox can't, such as
-an HTTP bridge to a host-only MCP server; see this repo's `host-start` and `config.toml`
-for Safari. It is opt-in because it runs outside the sandbox and the agent can edit it.
+an HTTP bridge to a host-only MCP server, then point the sandbox's `config.toml` at
+`http://192.168.64.1:<port>/mcp`. It is opt-in because it runs outside the sandbox and the agent can edit it.
 
 ### Per-project images
 
